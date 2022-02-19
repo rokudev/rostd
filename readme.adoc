@@ -1,0 +1,36 @@
+:doctype: book
+:icons: font
+
+= rostd
+
+Roku extensions to the pass:[C++] standard library.
+
+== Features
+
+rostd supports the following features.
+
+[%header,frame="topbot",grid="rows",stripes=none]
+|===
+| Header | Description
+| `<rostd/printx.hpp>` | <<doc/printx.adoc#,Type-safe printf>>.
+|===
+
+== Dependencies
+
+rostd depends on the pass:[C++] standard library.
+
+== Compatibility
+
+rostd requires pass:[C++20] and
+primarily targets the `gcc` and `clang` compilers.
+
+== Test Suite
+
+The rostd test suites are run with:
+[source,bash]
+----
+mkdir build
+cd build
+cmake ..
+make all test
+----

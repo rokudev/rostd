@@ -1,0 +1,381 @@
+:doctype: book
+:icons:
+
+= Leveraging pass:[C++20] For A True Type-Safe `printf`
+
+== Introduction
+
+_"Yet another type-safe printf? Isn't that a solved problem?"_
+
+Many pass:[C++] formatting libraries claim to be a "type-safe printf" but
+they are in reality alternatives to or replacements for `printf`.
+`rostd::printf` is not one of those; it is _literally_ type-safe `printf`.
+
+== The Problem of `printf`
+
+Standard C `printf` (and, by extension, pass:[C++] `std::printf`) is not
+_portably type-safe_.
+
+. It does not guarantee that the parameters given to the function match the
+  specifiers in the format string. This is not only a source of bugs, it's also
+  dangerous from a security perspective. Modern compilers typically implement
+  extensions that will identify `printf`-like calls and can provide warnings at
+  compile time when the specifiers don't match the arguments.
+. It is blind to typedefs. A typedef that is a `long int` might be a
+  `long long int` when compiled for a different platform. The only way to make
+  a typedef portable with `printf` is to give it its own format specifier. Some
+  types have special standard format modifiers, such as `std::size_t` (`%zu`).
+  But the vast majority of types are relegated to using macros, as with types
+  like `uint64_t` (`PRIu64`) and all user-defined types.
+. Some types don't even have a standard portable definition or associated
+  format specifier.
+  An example of this is the various `std::chrono::duration` types,
+  each of which has an underlying representation defined merely as
+  "signed integer type of at least [N] bits."
+  You cannot print `duration.count()` using (for example) `PRId64` or `%jd`
+  and remain strictly portable.
+
+Special emphasis on the last sentence of point #2: if you want your own
+types to be _portably type-safe_ for use with `printf`, you must
+associate each of those types with their own custom format specifier.
+For example:
+
+[source,cpp]
+----
+using Identifier = std::uint64_t;
+#define PRI_Identifier PRIu64
+----
+
+Then, the custom format specifier must be used everywhere as such:
+
+[source,cpp]
+----
+printf("The identifier is %" PRI_Identifier ".\n", id);
+----
+
+This is awkward and cumbersome, difficult to read, and requires
+strict devotion and attention to detail. I have never seen
+it work out in practice.
+
+== Alternatives
+
+As already mentioned, there are many alternatives to `printf` available, from
+standard iostreams to `std::format` to many different open-source libraries.
+We at Roku have investigated many of those options over the years. However,
+Roku code has a strong history with `printf` and we did not want that to
+change, for several reasons:
+
+* Many (almost all) type-safe formatting alternatives cause the compiler to
+  generate more code either at the call point and/or as part of an
+  implementation library. At Roku we are naturally averse to these code size
+  increases.
+* Given how much code needed to change, we were not comfortable adopting a
+  strategy that would revolutionize how we do formatting (as iostreams would,
+  for instance). It is too much work to transition and difficult for
+  developers to adapt to it.
+* We could not afford to sacrifice runtime performance across the board. Even
+  a formatting library that is faster most of the time, but doesn't match or
+  exceed current performance in all cases, is a risk.
+* There were other internal considerations related to how we do certain things
+  (such as logging) that would make a transition away from `printf` formatting
+  difficult and risky.
+
+== A Real Solution
+
+What if we could do this:
+
+[source,cpp]
+----
+printf("The identifier is %?.\n", id);
+----
+
+and just print whatever is there.
+We know the compiler can do error checking (with GCC, it is accomplished via
+the `format` attribute extension). The compiler should be able to go the
+rest of the way and fix up the string for us, replacing the `%?` specifier
+with `%llu` or whatever the type demands.
+
+If that were possible:
+
+* The caller would not need to care about what the type of `id` might be.
+* If the type changes, all format strings that print this type will
+  automatically adjust, safely.
+
+Fortunately, we at Roku had already enabled pass:[C++20]. It has lots of
+powerful features, but one in particular lets us do exactly this:
+
+[source,cpp]
+----
+printf<"The identifier is %?.\n">(id);
+----
+
+Here we take advantage of a feature in pass:[C++20] called cNTTP
+(class Non Type Template Parameter). An _instance_ of a string literal
+class type can be a template parameter, and with it, you can do almost
+anything you want _at compile time_.
+
+== Enter `rostd::printf`
+
+The `rostd` (pronounced "roasted") library is Roku's internal extensions to
+the pass:[C++] standard library. The `rostd::printf` family of functions is
+part of that library, and `rostd::printf` looks like this:
+
+[source,cpp]
+----
+namespace rostd {
+    template <printx::FmtLiteral Fmt, typename... Args>
+    int printf(Args const&... args) noexcept {
+        auto call = [&](auto const&... args) {
+            static constexpr auto f = printx::build_fmt<Fmt, Args...>();
+            return std::printf(f.data, args...);
+        };
+        return printx::call_func(call, args...);
+    }
+} // namespace rostd
+----
+
+First note that this formula can be adapted to any `printf`-family function.
+In this case, it's a simple wrapper around `std::printf` but it will work for
+any such function, and implementations of both `rostd::fprintf` and
+`rostd::snprintf` are provided as well.
+
+There are two function calls in here, both within the `rostd::printx`
+namespace, which do nearly all of the work:
+
+`rostd::printx::build_fmt()`::
+
+This function builds a valid `std::printf` format string based on an analysis
+of the format string `Fmt` (template parameter) coupled with the types
+provided in `Args`. Its job is:
+
+* Look for instances of `%?` and replace them with the correct specifiers for
+  the associated argument types in `Args`.
+* Find other (standard) specifiers, verify that they are compatible with
+  the associated type, generating a compile-time error if they are not.
+* Build a new format string containing all the correct specifier replacements,
+  null-terminate and return it.
+
+`rostd::printx::call_func()`::
+
+This function applies the provided arguments to the function, while also
+allowing those arguments to be _translated_ to other types. It can therefore
+provide direct support for types such as:
+
+* `std::string`, `std::string_view`, `std::filesystem::path`, etc.
+* `enum` (and `enum class`) types
+* limited support for user-defined types (by specializing the
+  `printx::FmtTraits` template class)
+
+Take a look at the source code for more detail. Note that, besides cNTTP,
+other new language features used include:
+concepts, `consteval`, and `constexpr virtual`.
+
+[NOTE]
+====
+_Why does the format string need to be a template parameter?_
+
+The string that ends up in the compiled binary is _transformed_ from the one
+that is provided in the code. In order to store that transformed string, we
+need to know how long it will be, so that we may convert that length to
+(part of) a type, like a `std::array`, which will contain the transformed
+string. Unfortunately, that's not possible to do in pass:[C++] with a mere
+function parameter, because it is not a constant expression.
+
+If we only needed to parse the string to verify its correctness then we
+could do that. But building a type from its size does not work. It does
+work for template parameters, because they are constant expressions.
+====
+
+== Usage Examples
+
+Here is an example with adjacent functionally-equivalent uses of
+`std::printf` and `rostd::printf`, with their resulting object code
+disassemblies below them (clang-13, x86_64). Note any differences in the
+object code, if you can find them.
+
+[NOTE]
+====
+The symbol name of the `rostd::printf`-generated format string
+(`_ZZZN5rostd6printf`) is much longer than what is presented here,
+so it is truncated for display purposes. It's irrelevant for
+code-generation comparisons because it does not end up in the final
+link of the binary.
+====
+
+[cols="1,1", frame="none", grid="none"]
+|===
+a|
+[source,cpp]
+----
+#include <cstdio>
+
+void report(std::string_view test_name, std::int64_t duration, unsigned threads) {
+    std::printf("Test '%.*s' succeeded in %" PRId64 "ms using %u threads.\n",
+            static_cast<int>(test_name.size()), test_name.data(), duration, threads);
+}
+----
+a|
+[source,cpp]
+----
+#include <rostd/printx.hpp>
+
+void report(std::string_view test_name, std::int64_t duration, unsigned threads) {
+    rostd::printf<"Test '%?' succeeded in %?ms using %? threads.\n">
+            (test_name, duration, threads);
+}
+----
+a|
+[source,asm]
+----
+report(std::basic_string_view<char, std::char_traits<char> >, long, unsigned int):
+        mov     r8d, ecx
+        mov     rcx, rdx
+        mov     rdx, rsi
+        mov     rsi, rdi
+        mov     edi, offset .L.str
+        xor     eax, eax
+        jmp     printf                          # TAILCALL
+.L.str:
+        .asciz  "Test '%.*s' succeeded in %ldms using %u threads.\n"
+----
+a|
+[source,asm]
+----
+report(std::basic_string_view<char, std::char_traits<char> >, long, unsigned int):
+        mov     r8d, ecx
+        mov     rcx, rdx
+        mov     rdx, rsi
+        mov     rsi, rdi
+        mov     edi, offset _ZZZN5rostd6printf
+        xor     eax, eax
+        jmp     printf                          # TAILCALL
+_ZZZN5rostd6printf:
+        .asciz  "Test '%.*s' succeeded in %ldms using %u threads.\n"
+----
+|===
+
+The result compiles directly to a call of the underlying
+`std::printf` function, with a guaranteed-correct format string. It's
+impossible to tell (beyond the ephemeral symbol name) that
+`rostd::printf` was even used. It compiles away entirely.
+This is why `rostd::printf` _is_ type-safe `printf`. The resulting object
+code is `printf` _and only_ `printf`!
+
+More usage examples are below. Note the following:
+
+* All standard `printf` format strings are supported; flags, as well as width
+  and precision fields, are supported even in combination with `%?`.
+* There are no format _length modifiers_ used in these examples.
+  You may use them, but they will be ignored and replaced.
+* When using `%?`, floating point types are printed as-if using `%g`. However,
+  any floating point specifier may be used explicitly.
+* Types like `std::string` and `std::string_view` can be printed using
+  `%?` or `%s`.
+
+[source,cpp]
+----
+auto const my_sv = std::string_view{"my string view"};
+auto const my_str = std::string{"my string"};
+rostd::printf<"%s">(my_sv); // prints "my string view"
+rostd::printf<"%s">(my_str); // prints "my string"
+
+auto const my_ull = 12345ull;
+rostd::printf<"%u">(my_ull); // prints "12345"
+rostd::printf<"%?">(my_ull); // prints "12345"
+rostd::printf<"0x%x">(my_ull); // prints "0x3039"
+rostd::printf<"%o">(my_ull); // prints "30071"
+rostd::printf<"%c">(my_ull); // compile-time error: "format %c expects argument of type char"
+
+auto const my_float = 3.125f;
+rostd::printf<"%?">(my_float); // prints "3.125"
+rostd::printf<"%A">(my_float); // prints "0X1.9P+1"
+rostd::printf<"%e">(my_float); // prints "3.125000e+00"
+
+rostd::printf<"%10?">("right"); // prints "     right"
+rostd::printf<"%-10?">("left"); // prints "left      "
+rostd::printf<"%10.2?">(my_str); // prints "        my"
+rostd::printf<"%-10.2?">(my_str); // prints "my        "
+----
+
+== Error Messages
+
+Strict error checking is performed on the format strings that are given to
+`rostd::printf`. However, because pass:[C++] does not provide a way to
+directly customize the compiler's error messages, `rostd::printf` will
+cause the compiler to trigger an error on a line of code that begins with
+`PRINTX_ERROR` when there is a problem. If such an error occurs, whatever
+else is printed, there should be some text in the error message that looks
+something like:
+
+----
+rostd-public/rostd/include/rostd/printx.hpp:204:13: note: in expansion of macro ‘PRINTX_ERROR’
+  204 |             PRINTX_ERROR("format %c expects argument of type char");
+      |             ^~~~~~~~~~~~
+----
+
+The rest of the error message should then give you enough information to
+trace the problem back to the line of code that caused it.
+
+== Compiler Performance
+
+Given that we're now running more code at compile time, it is important
+to be aware of how it affects compile time performance. The graph below
+demonstrates the compile performance (using gcc-10.3) for a `rostd::printf`
+statement with N:[1-64] parameters.
+
+* The yellow line (printf-int) is the _baseline_. It is the time to compile
+  a file with one `std::printf` statement that contains N parameters
+  (all `int`, in this case).
+* The blue line (printx-int) represents the same, but using `rostd::printf`
+  instead of `std::printf`.
+* The orange line (printx-double) represents `rostd::printf` with N parameters
+  that are of type `double`.
+* The gray line (printx-string_view) represents `rostd::printf` with N
+  parameters that are of type `std::string_view`. This diverges significantly
+  because for each `std::string_view` parameter, two values go on the stack
+  (to be passed to `std::printf`).
+
+image::./printx.jpg[]
+
+Since most `printf` calls contain at most a handful of parameters, compile
+times are not significantly affected. But even in the rare case of a printf
+with dozens of parameters, compile times can still remain reasonable.
+Additionally, we believe compilers will get better at this over time.
+
+== Adapting "Printx Form" To Your Own Functions
+
+Take the following hypothetical example:
+
+[source,cpp]
+----
+class Logger {
+public:
+    int log(char const* fmt, ...) __attribute__((format(printf, 2, 3)));
+};
+----
+
+You can adapt this to `printx` form by changing it to use the formula
+described above:
+
+[source,cpp]
+----
+class Logger {
+private:
+    int log(char const* fmt, ...);
+
+public:
+    template <rostd::printx::FmtLiteral Fmt, typename... Args>
+    int log(Args const&... args) {
+        auto call = [this](auto const&... args) {
+            static constexpr auto f = rostd::printx::build_fmt<Fmt, Args...>();
+            return log(f.data, args...);
+        };
+        return rostd::printx::call_func(call, args...);
+    }
+};
+----
+
+Fixing up all the call points to move the format string into the template
+parameter can be done by a script written in your favorite text processing
+language.
+As already demonstrated, the generated binary object code will be equivalent.
