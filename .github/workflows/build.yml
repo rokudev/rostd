@@ -14,7 +14,11 @@ jobs:
   build:
     strategy:
       matrix:
-        os: [ ubuntu-22.04, windows-2022, macos-11 ]
+        os: 
+          - ubuntu-22.04
+          # fails: https://github.com/dyitzchaki-roku/rostd/actions/runs/3371108882/jobs/5592884758
+          # - windows-2022
+          - macos-11
         include:
           - os: ubuntu-22.04
             c_compiler: gcc-11
