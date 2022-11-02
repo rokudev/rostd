@@ -9,10 +9,12 @@ set(EXECUTABLE_OUTPUT_PATH ${CMAKE_BINARY_DIR}/bin)
 
 add_subdirectory(cmake)
 
+target_compile_features(rostd INTERFACE cxx_std_20)
+
 if (MSVC)
   target_compile_options(rostd INTERFACE /W3)
 else()
-  target_compile_options(rostd INTERFACE -std=c++20 -Wall -Wextra -pedantic -Werror=return-type)
+  target_compile_options(rostd INTERFACE -Wall -Wextra -pedantic -Werror=return-type)
 endif()
 
 enable_testing()
