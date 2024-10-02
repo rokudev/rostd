@@ -17,11 +17,11 @@ enum class EnumTest2 : unsigned long {};
 enum class EnumTest3 : short {};
 enum class EnumTest4 {};
 
-namespace rostd::printx {
-template <> struct FmtTraits<EnumTest4> {
+namespace rostd::printx::detail {
+template <> struct traits<EnumTest4> {
     static constexpr auto spec = "s";
 };
-} // namespace rostd::printx
+} // namespace rostd::printx::detail
 
 namespace printx_suite {
 namespace { // anonymous
@@ -214,38 +214,56 @@ ASSERT("%?",       EnumTest4,              "%s");
 
 #undef ASSERT
 
-static_assert(fmteq(build_fmt<"no args">().data,     "no args"));
-static_assert(fmteq(build_fmt<"%% %%">().data,       "%% %%"));
+static_assert(fmteq(build_fmt<"no args">().data, "no args"));
+static_assert(fmteq(build_fmt<"%% %%">().data, "%% %%"));
 
-static_assert(fmteq(build_fmt<"%*?", int, char*>().data,            "%*s"));
-static_assert(fmteq(build_fmt<"%*?", short, char*>().data,          "%*s"));
-static_assert(fmteq(build_fmt<"%.*?", int, char*>().data,           "%.*s"));
-static_assert(fmteq(build_fmt<"%.*?", short, char*>().data,         "%.*s"));
-static_assert(fmteq(build_fmt<"%*.*?", int, int, char*>().data,     "%*.*s"));
+// Guarantee width and precision specifiers work with `int`
+static_assert(fmteq(build_fmt<"%*?", int, char*>().data, "%*s"));
+static_assert(fmteq(build_fmt<"%*?", int, char*>().data, "%*s"));
+static_assert(fmteq(build_fmt<"%*?", int, char*>().data, "%*s"));
+static_assert(fmteq(build_fmt<"%.*?", int, char*>().data, "%.*s"));
+static_assert(fmteq(build_fmt<"%.*?", int, char*>().data, "%.*s"));
+static_assert(fmteq(build_fmt<"%*.*?", int, int, char*>().data, "%*.*s"));
+static_assert(fmteq(build_fmt<"%*.*?", int, int, char*>().data, "%*.*s"));
+
+// Guarantee width and precision specifiers work with anything that promotes to
+// an `int`.
+static_assert(fmteq(build_fmt<"%*.*?", bool, bool, char*>().data, "%*.*s"));
+static_assert(fmteq(build_fmt<"%*.*?", char, char, char*>().data, "%*.*s"));
+static_assert(fmteq(build_fmt<"%*.*?", signed char, signed char, char*>().data, "%*.*s"));
+static_assert(fmteq(build_fmt<"%*.*?", unsigned char, unsigned char, char*>().data, "%*.*s"));
 static_assert(fmteq(build_fmt<"%*.*?", short, short, char*>().data, "%*.*s"));
+static_assert(fmteq(build_fmt<"%*.*?", unsigned short, unsigned short, char*>().data, "%*.*s"));
+static_assert(fmteq(build_fmt<"%*.*?", int, int, char*>().data, "%*.*s"));
+static_assert(fmteq(build_fmt<"%*.*?", unsigned int, unsigned int, char*>().data, "%*.*s"));
 
-static_assert(fmteq(build_fmt<
-        "a %? b %x c %% d %? e\n",
-        double, unsigned long, char const*
-        >().data,
+static_assert(fmteq(build_fmt<"a %? b %x c %% d %? e\n", double, unsigned long,
+                            char const*>()
+                            .data,
         "a %g b %lx c %% d %s e\n"));
+
+// Ensure the width specifier can still be used with `std::string_view`:
+static_assert(fmteq(build_fmt<"%*?", int, std::string_view>().data, "%*.*s"));
 
 } // namespace compile_time_unit_tests
 } // anonymous namespace
 } // namespace printx_suite
 
 int main() {
-    char buf[1024] = {};
     using namespace std::literals;
+    static constexpr auto buffer_size = std::size_t{1024};
 
     { // Check %n functionality.
+        auto buf = std::vector<char>(buffer_size, '\0');
         auto pos = int{};
-        auto const size = rostd::snprintf<"Size and pos should be equal.%n">
-                                        (buf, sizeof buf, &pos);
+        auto const size = rostd::sprintf<"Size and pos should be equal.%n">
+                                        (buf, &pos);
         assert(size == pos);
+        assert(buf[size] == '\0');
     }
 
     { // Guarantee that packed fields can bind to snprintf function parameters:
+        auto buf = std::array<char, buffer_size>{};
         struct Packed {
             unsigned a:2;
             short    b:12;
@@ -253,9 +271,11 @@ int main() {
             bool     d:1;
         };
         auto p = Packed{3, -2000, 3, 1};
-        rostd::snprintf<"%d %? %d %?">(buf, sizeof buf, p.a, p.b, p.c, p.d);
-        assert(buf == std::string_view{"3 -2000 3 1"});
+        rostd::sprintf<"%d %? %d %?">(buf, p.a, p.b, p.c, p.d);
+        assert(buf.data() == std::string_view{"3 -2000 3 1"});
     }
+
+    char buf[buffer_size] = {};
 
 #define CHECK_CMP(Val, Fmt, Output) \
     { \

@@ -40,7 +40,7 @@ types to be _portably type-safe_ for use with `printf`, you must
 associate each of those types with their own custom format specifier.
 For example:
 
-[source,cpp]
+[source,c++]
 ----
 using Identifier = std::uint64_t;
 #define PRI_Identifier PRIu64
@@ -48,7 +48,7 @@ using Identifier = std::uint64_t;
 
 Then, the custom format specifier must be used everywhere as such:
 
-[source,cpp]
+[source,c++]
 ----
 printf("The identifier is %" PRI_Identifier ".\n", id);
 ----
@@ -84,7 +84,7 @@ change, for several reasons:
 
 What if we could do this:
 
-[source,cpp]
+[source,c++]
 ----
 printf("The identifier is %?.\n", id);
 ----
@@ -104,7 +104,7 @@ If that were possible:
 Fortunately, we at Roku had already enabled pass:[C++20]. It has lots of
 powerful features, but one in particular lets us do exactly this:
 
-[source,cpp]
+[source,c++]
 ----
 printf<"The identifier is %?.\n">(id);
 ----
@@ -120,24 +120,24 @@ The `rostd` (pronounced "roasted") library is Roku's internal extensions to
 the pass:[C++] standard library. The `rostd::printf` family of functions is
 part of that library, and `rostd::printf` looks like this:
 
-[source,cpp]
+[source,c++]
 ----
 namespace rostd {
-    template <printx::FmtLiteral Fmt, typename... Args>
+    template <printx::literal Fmt, typename... Args>
     int printf(Args const&... args) noexcept {
         auto call = [&](auto const&... args) {
             static constexpr auto f = printx::build_fmt<Fmt, Args...>();
             return std::printf(f.data, args...);
         };
-        return printx::call_func(call, args...);
+        return printx::invoke(call, args...);
     }
 } // namespace rostd
 ----
 
 First note that this formula can be adapted to any `printf`-family function.
 In this case, it's a simple wrapper around `std::printf` but it will work for
-any such function, and implementations of both `rostd::fprintf` and
-`rostd::snprintf` are provided as well.
+any such function, and implementations of `rostd::fprintf`, `rostd::sprintf`,
+and `rostd::snprintf` are provided as well.
 
 There are two function calls in here, both within the `rostd::printx`
 namespace, which do nearly all of the work:
@@ -155,7 +155,7 @@ provided in `Args`. Its job is:
 * Build a new format string containing all the correct specifier replacements,
   null-terminate and return it.
 
-`rostd::printx::call_func()`::
+`rostd::printx::invoke()`::
 
 This function applies the provided arguments to the function, while also
 allowing those arguments to be _translated_ to other types. It can therefore
@@ -164,7 +164,7 @@ provide direct support for types such as:
 * `std::string`, `std::string_view`, `std::filesystem::path`, etc.
 * `enum` (and `enum class`) types
 * limited support for user-defined types (by specializing the
-  `printx::FmtTraits` template class)
+  `printx::detail::traits` template class)
 
 Take a look at the source code for more detail. Note that, besides cNTTP,
 other new language features used include:
@@ -205,7 +205,7 @@ link of the binary.
 [cols="1,1", frame="none", grid="none"]
 |===
 a|
-[source,cpp]
+[source,c++]
 ----
 #include <cstdio>
 
@@ -215,7 +215,7 @@ void report(std::string_view test_name, std::int64_t duration, unsigned threads)
 }
 ----
 a|
-[source,cpp]
+[source,c++]
 ----
 #include <rostd/printx.hpp>
 
@@ -272,7 +272,7 @@ More usage examples are below. Note the following:
 * Types like `std::string` and `std::string_view` can be printed using
   `%?` or `%s`.
 
-[source,cpp]
+[source,c++]
 ----
 auto const my_sv = std::string_view{"my string view"};
 auto const my_str = std::string{"my string"};
@@ -308,8 +308,8 @@ else is printed, there should be some text in the error message that looks
 something like:
 
 ----
-rostd-public/rostd/include/rostd/printx.hpp:204:13: note: in expansion of macro ‘PRINTX_ERROR’
-  204 |             PRINTX_ERROR("format %c expects argument of type char");
+rostd-public/rostd/include/rostd/printx.hpp:175:9: note: in expansion of macro ‘PRINTX_ERROR’
+  175 |             PRINTX_ERROR("format %c expects argument of type char");
       |             ^~~~~~~~~~~~
 ----
 
@@ -346,7 +346,7 @@ Additionally, we believe compilers will get better at this over time.
 
 Take the following hypothetical example:
 
-[source,cpp]
+[source,c++]
 ----
 class Logger {
 public:
@@ -357,20 +357,19 @@ public:
 You can adapt this to `printx` form by changing it to use the formula
 described above:
 
-[source,cpp]
+[source,c++]
 ----
 class Logger {
 private:
     int log(char const* fmt, ...);
 
 public:
-    template <rostd::printx::FmtLiteral Fmt, typename... Args>
+    template <rostd::printx::literal Fmt, typename... Args>
     int log(Args const&... args) {
-        auto call = [this](auto const&... args) {
+        return rostd::printx::invoke([this](auto const&... args) {
             static constexpr auto f = rostd::printx::build_fmt<Fmt, Args...>();
             return log(f.data, args...);
-        };
-        return rostd::printx::call_func(call, args...);
+        }, args...);
     }
 };
 ----
@@ -378,4 +377,4 @@ public:
 Fixing up all the call points to move the format string into the template
 parameter can be done by a script written in your favorite text processing
 language.
-As already demonstrated, the generated binary object code will be equivalent.
+As already mentioned, the generated binary object code will be equivalent.

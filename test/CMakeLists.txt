@@ -5,4 +5,4 @@ function(rostd_suite name)
   add_test(${name} ${EXECUTABLE_OUTPUT_PATH}/${name})
 endfunction()
 
-rostd_suite(ext_printx_suite ext/printx_suite.cpp)
+rostd_suite(printx_suite printx_suite.cpp)
